@@ -1,0 +1,480 @@
+﻿#Requires AutoHotkey v2.0
+#SingleInstance Force
+#UseHook true
+
+; Press Ctrl+Alt+K to show Key History
+^!k::KeyHistory
+
+
+#Requires AutoHotkey v2.0
+#SingleInstance Force
+#UseHook true
+Persistent true  ; Keep script running
+
+; ============================================================================
+; MIDDLE BUTTON GESTURES FOR TRACKPOINT/LAPTOP
+; ============================================================================
+;
+; FEATURES:
+; 1. Desktop gestures when mouse is over desktop background
+;    - Horizontal drag: Switch virtual desktops (Win+Ctrl+Left/Right)
+;    - Upward drag: Task View (Win+Tab)
+;    - Downward drag: Show desktop (Win+D)
+;
+; 2. Application scrolling when mouse is over any window
+;    - Vertical drag: Scroll up/down
+;    - Horizontal drag: Scroll left/right
+;    - Optimized for TrackPoint sensitivity
+;
+; 3. Sensitivity adjustment hotkeys
+;    - Win+Ctrl+Plus: Increase scroll sensitivity
+;    - Win+Ctrl+Minus: Decrease scroll sensitivity
+;    - Win+Ctrl+0: Show current sensitivity
+;
+; 4. Emergency escape: Press Esc during gesture to cancel
+;
+; ============================================================================
+
+; ---------- Send reliability ----------
+SendMode "Input"
+SetKeyDelay -1, -1
+
+; ---------- Tunables for TrackPoint ----------
+gestureThreshold := 45      ; Lower threshold for easier triggering
+scrollStep := 1
+scrollIntervalMs := 20      ; Faster scrolling response
+scrollThreshold := 2        ; Very low threshold for trackpoint
+scrollMultiplier := 0.4     ; Sensitivity multiplier (0.4 = 40% movement needed)
+
+; Battery-aware polling intervals
+pollMsAC := 10              ; Faster polling on AC power
+pollMsBattery := 15         ; Slower polling on battery to save power
+
+; Trackpoint acceleration curve (more responsive to small movements)
+trackpointCurve(x) {
+    ; Custom curve: small movements get amplified, large movements normalized
+    if (x < 5)
+        return x * 1.5      ; Boost tiny movements
+    else if (x < 15)
+        return x * 1.2      ; Moderate boost
+    else
+        return x * 0.8      ; Smooth out large movements
+}
+
+global gBlockSnip := false
+global isGesturing := false
+
+; ---------- Settings file ----------
+settingsFile := A_ScriptDir "\GestureSettings.ini"
+
+; ---------- Load saved settings ----------
+LoadSettings() {
+    global scrollMultiplier, gestureThreshold
+    
+    if (FileExist(settingsFile)) {
+        try {
+            scrollMultiplier := IniRead(settingsFile, "Settings", "Sensitivity", 0.4)
+            gestureThreshold := IniRead(settingsFile, "Settings", "Threshold", 45)
+            ; Ensure values are within valid ranges
+            scrollMultiplier := Min(Max(scrollMultiplier, 0.1), 1.0)
+            gestureThreshold := Min(Max(gestureThreshold, 30), 100)
+        }
+    }
+}
+
+; ---------- Save settings ----------
+SaveSettings() {
+    global scrollMultiplier, gestureThreshold
+    
+    try {
+        IniWrite(scrollMultiplier, settingsFile, "Settings", "Sensitivity")
+        IniWrite(gestureThreshold, settingsFile, "Settings", "Threshold")
+        return true
+    } catch {
+        return false
+    }
+}
+
+; Load settings when script starts
+LoadSettings()
+
+; ---------- Battery detection ----------
+IsOnBattery() {
+    ; Returns true if running on battery power
+    static SYSTEM_POWER_STATUS := Buffer(12)
+    if (DllCall("GetSystemPowerStatus", "Ptr", SYSTEM_POWER_STATUS)) {
+        ACLineStatus := NumGet(SYSTEM_POWER_STATUS, 0, "UChar")
+        return (ACLineStatus == 0)  ; 0 = Battery, 1 = AC
+    }
+    return false  ; Assume AC if can't determine
+}
+
+; ---------- Desktop detection (MOUSE-BASED) ----------
+IsMouseOverDesktop() {
+    ; Get the window under the mouse cursor, NOT the active window
+    MouseGetPos , , &mouseWin
+    
+    if !mouseWin
+        return false
+
+    ; GA_ROOT = 2 - Get the root/top-level window
+    top := DllCall("GetAncestor", "ptr", mouseWin, "uint", 2, "ptr")
+    if !top
+        top := mouseWin
+    
+    try {
+        cls := WinGetClass(top)
+    } catch {
+        return false
+    }
+    
+    ; Check if it's a desktop window
+    return (cls = "Progman" || cls = "WorkerW" || cls = "Shell_TrayWnd")
+}
+
+; ---------- Block Snipping Tool only during gestures ----------
+#HotIf gBlockSnip
+#+s::return          ; Block Win+Shift+S (Snipping Tool)
+PrintScreen::return  ; Block PrintScreen (optional)
+#HotIf
+
+; ---------- Release all modifiers safely ----------
+ReleaseModifiers() {
+    if GetKeyState("Ctrl", "P")
+        SendInput "{Ctrl up}"
+    if GetKeyState("Alt", "P")
+        SendInput "{Alt up}"
+    if GetKeyState("Shift", "P")
+        SendInput "{Shift up}"
+    if GetKeyState("LWin", "P") || GetKeyState("RWin", "P")
+        SendInput "{LWin up}{RWin up}"
+}
+
+; ---------- Middle button gesture ----------
+MButton::
+{
+    MouseGetPos &x0, &y0, &startWin
+    lastX := x0, lastY := y0
+
+    ; Use mouse position, not active window
+    isDesktop := IsMouseOverDesktop()
+    didGesture := false
+    lastScroll := A_TickCount
+    isGesturing := true
+    
+    ; Variables for smoother scrolling
+    vAccum := 0  ; Vertical accumulator
+    hAccum := 0  ; Horizontal accumulator
+    accumulatedThreshold := 3  ; How much movement to accumulate before scrolling
+
+    ; Small delay to differentiate click from drag
+    Sleep 30
+
+    ; Determine polling interval based on power source
+    currentPollMs := IsOnBattery() ? pollMsBattery : pollMsAC
+
+    while GetKeyState("MButton", "P") {
+        Sleep currentPollMs
+        MouseGetPos &x, &y
+        dx := x - x0
+        dy := y - y0
+
+        ; ===== Desktop gesture (fires once) =====
+        if (isDesktop && !didGesture && (Abs(dx) >= gestureThreshold || Abs(dy) >= gestureThreshold)) {
+            didGesture := true
+            gBlockSnip := true
+
+            ReleaseModifiers()
+            Sleep 20
+            
+            if (Abs(dx) > Abs(dy)) {
+                ; Horizontal: Switch virtual desktops
+                if (dx > 0) {
+                    SendInput "{LWin down}{Ctrl down}{Right}{Ctrl up}{LWin up}"
+                } else {
+                    SendInput "{LWin down}{Ctrl down}{Left}{Ctrl up}{LWin up}"
+                }
+            } else {
+                ; Vertical: Task View or Show Desktop
+                if (dy < 0) {
+                    ; Up: Task View
+                    SendInput "{LWin down}{Tab}{LWin up}"
+                } else {
+                    ; Down: Show Desktop
+                    SendInput "{LWin down}d{LWin up}"
+                }
+            }
+            
+            Sleep 50
+            gBlockSnip := false
+            MouseGetPos &x0, &y0
+            break
+        }
+
+        ; ===== TRACKPOINT-OPTIMIZED APP SCROLLING =====
+        if (!isDesktop && !didGesture) {
+            rdx := x - lastX
+            rdy := y - lastY
+            
+            ; Apply trackpoint curve to smooth movement
+            rdx := trackpointCurve(rdx)
+            rdy := trackpointCurve(rdy)
+            
+            ; Accumulate small movements (essential for trackpoint)
+            vAccum += rdy
+            hAccum += rdx
+            
+            ; Only process scrolling at our interval
+            if (A_TickCount - lastScroll >= scrollIntervalMs) {
+                scrollHappened := false
+                
+                ; Vertical scrolling with accumulation
+                if (Abs(vAccum) > accumulatedThreshold) {
+                    ; Apply multiplier for trackpoint sensitivity
+                    effectiveMovement := vAccum * scrollMultiplier
+                    clicks := Max(1, Round(Abs(effectiveMovement) / 6))
+                    
+                    if (vAccum > 0) {
+                        SendInput "{WheelDown " clicks "}"
+                    } else {
+                        SendInput "{WheelUp " clicks "}"
+                    }
+                    vAccum := 0  ; Reset accumulator
+                    scrollHappened := true
+                }
+                
+                ; Horizontal scrolling with accumulation
+                if (Abs(hAccum) > accumulatedThreshold) {
+                    effectiveMovement := hAccum * scrollMultiplier
+                    clicksH := Max(1, Round(Abs(effectiveMovement) / 6))
+                    
+                    if (hAccum > 0) {
+                        SendInput "{WheelRight " clicksH "}"
+                    } else {
+                        SendInput "{WheelLeft " clicksH "}"
+                    }
+                    hAccum := 0  ; Reset accumulator
+                    scrollHappened := true
+                }
+                
+                if (scrollHappened) {
+                    lastScroll := A_TickCount
+                }
+            }
+
+            lastX := x
+            lastY := y
+        }
+    }
+    
+    isGesturing := false
+    return
+}
+
+; Suppress native middle-click release
+MButton Up::return
+
+; ============================================================================
+; CONFIGURATION HOTKEYS
+; ============================================================================
+
+; ----------------------------------------------------------------------------
+; Win+Ctrl+Plus: Increase scroll sensitivity
+; Press to make scrolling more responsive (requires less movement)
+; ----------------------------------------------------------------------------
+#^=:: {
+    global scrollMultiplier
+    scrollMultiplier := Min(scrollMultiplier + 0.1, 1.0)
+    SaveSettings()
+    ToolTip "Scroll sensitivity: " Round(scrollMultiplier * 100) "%", , , 2
+    SetTimer () => ToolTip( , , , 2), -1500
+}
+
+; ----------------------------------------------------------------------------
+; Win+Ctrl+Minus: Decrease scroll sensitivity
+; Press to make scrolling less sensitive (requires more movement)
+; ----------------------------------------------------------------------------
+#^-:: {
+    global scrollMultiplier
+    scrollMultiplier := Max(scrollMultiplier - 0.1, 0.1)
+    SaveSettings()
+    ToolTip "Scroll sensitivity: " Round(scrollMultiplier * 100) "%", , , 2
+    SetTimer () => ToolTip( , , , 2), -1500
+}
+
+; ----------------------------------------------------------------------------
+; Win+Ctrl+0: Show current sensitivity
+; Displays current sensitivity percentage for 1.5 seconds
+; ----------------------------------------------------------------------------
+#^0:: {
+    global scrollMultiplier
+    ToolTip "Current scroll sensitivity: " Round(scrollMultiplier * 100) "%", , , 2
+    SetTimer () => ToolTip( , , , 2), -1500
+}
+
+; ----------------------------------------------------------------------------
+; Win+Ctrl+G: Show gesture threshold
+; Shows current gesture threshold distance in pixels
+; ----------------------------------------------------------------------------
+#^g:: {
+    global gestureThreshold
+    ToolTip "Gesture threshold: " gestureThreshold " pixels", , , 2
+    SetTimer () => ToolTip( , , , 2), -1500
+}
+
+; ----------------------------------------------------------------------------
+; Win+Ctrl+T: Toggle ToolTip debug mode (optional)
+; Shows real-time debugging info about mouse position and state
+; ----------------------------------------------------------------------------
+#^t:: {
+    static debugMode := false
+    debugMode := !debugMode
+    
+    if (debugMode) {
+        SetTimer DebugToolTip, 100
+        ToolTip "Debug mode ON", , , 1
+        SetTimer () => ToolTip( , , , 1), -1500
+    } else {
+        SetTimer DebugToolTip, 0
+        ToolTip "Debug mode OFF", , , 1
+        SetTimer () => ToolTip( , , , 1), -1500
+    }
+    
+    DebugToolTip() {
+        MouseGetPos &mx, &my, &mwin
+        
+        ; Safe way to get window class
+        winClass := ""
+        try {
+            winClass := WinGetClass(mwin)
+        } catch Error as err {
+            winClass := "N/A"
+        }
+        
+        isDesktop := IsMouseOverDesktop()
+        ToolTip "Mouse: " mx "," my "`nWindow: " mwin "`nClass: " winClass "`nDesktop: " isDesktop "`nGesturing: " isGesturing, 10, 10, 1
+    }
+}
+
+; ----------------------------------------------------------------------------
+; Win+Ctrl+S: Save settings manually
+; ----------------------------------------------------------------------------
+#^s:: {
+    if SaveSettings() {
+        ToolTip "Settings saved!", , , 2
+    } else {
+        ToolTip "Failed to save settings", , , 2
+    }
+    SetTimer () => ToolTip( , , , 2), -1500
+}
+
+; ----------------------------------------------------------------------------
+; Win+Ctrl+L: Load settings manually
+; ----------------------------------------------------------------------------
+#^l:: {
+    LoadSettings()
+    ToolTip "Settings loaded!", , , 2
+    SetTimer () => ToolTip( , , , 2), -1500
+}
+
+; ============================================================================
+; TRAY MENU ENHANCEMENTS
+; ============================================================================
+
+; Change tray icon to something more appropriate (optional)
+TraySetIcon "shell32.dll", 44  ; Mouse cursor icon
+
+; Add custom tray menu items
+A_TrayMenu.Delete()  ; Remove default menu
+A_TrayMenu.Add("&Quick Help", ShowQuickHelp)
+A_TrayMenu.Add()  ; Separator
+A_TrayMenu.Add("&Sensitivity: " Round(scrollMultiplier * 100) "%", (*) => ToolTip("Use Win+Ctrl+± to adjust", , , 2))
+A_TrayMenu.Add("&Threshold: " gestureThreshold "px", (*) => ToolTip("Gesture distance threshold", , , 2))
+A_TrayMenu.Add()  ; Separator
+A_TrayMenu.Add("&Save Settings", (*) => (SaveSettings() && ToolTip("Saved!", , , 2)))
+A_TrayMenu.Add("&Reload Script", (*) => Reload())
+A_TrayMenu.Add("&Edit Script", (*) => Run("notepad.exe '" A_ScriptFullPath "'"))
+A_TrayMenu.Add()  ; Separator
+A_TrayMenu.Add("E&xit", (*) => ExitApp())
+A_TrayMenu.Default := "&Quick Help"  ; Double-click opens Quick Help
+
+ShowQuickHelp(*) {
+    powerStatus := IsOnBattery() ? "Battery" : "AC"
+    pollingSpeed := IsOnBattery() ? pollMsBattery : pollMsAC
+    
+    helpText := "
+    (
+=== MIDDLE BUTTON GESTURES ===
+
+ON DESKTOP (drag middle button):
+  → Right: Next virtual desktop (Win+Ctrl+Right)
+  ← Left: Previous virtual desktop (Win+Ctrl+Left)
+  ↑ Up: Task View (Win+Tab)
+  ↓ Down: Show Desktop (Win+D)
+
+IN APPLICATIONS (drag middle button):
+  Vertical: Scroll up/down
+  Horizontal: Scroll left/right
+
+HOTKEYS:
+  Win+Ctrl+±: Adjust scroll sensitivity
+  Win+Ctrl+0: Show current sensitivity
+  Win+Ctrl+G: Show gesture threshold
+  Win+Ctrl+T: Toggle debug mode
+  Win+Ctrl+S: Save settings
+  Win+Ctrl+R: Reload script
+  Esc: Cancel ongoing gesture
+
+CURRENT SETTINGS:
+  Threshold: " gestureThreshold " pixels
+  Sensitivity: " Round(scrollMultiplier * 100) "%
+  Power: " powerStatus " (Polling: " pollingSpeed "ms)
+
+TIPS:
+  • Drag slowly for precise scrolling
+  • Drag quickly for desktop gestures
+  • Settings auto-save on adjustment
+    )"
+    
+    MsgBox(helpText, "Gesture Help", 0x40)
+}
+
+; ============================================================================
+; EMERGENCY FUNCTIONS
+; ============================================================================
+
+; ----------------------------------------------------------------------------
+; Esc: Cancel ongoing gesture
+; Press Esc while holding middle button to cancel the current gesture
+; ----------------------------------------------------------------------------
+Esc::
+{
+    if (isGesturing) {
+        SendInput "{MButton up}"
+        isGesturing := false
+        gBlockSnip := false
+        ToolTip "Gesture cancelled", , , 3
+        SetTimer () => ToolTip( , , , 3), -1000
+    }
+    return
+}
+
+; ----------------------------------------------------------------------------
+; Win+Ctrl+R: Reload script
+; Useful for applying changes or resetting state
+; ----------------------------------------------------------------------------
+#^r:: {
+    Reload
+}
+
+; ============================================================================
+; AUTO-SAVE ON EXIT
+; ============================================================================
+
+; Save settings when script exits with friendly message
+OnExit (*) => (
+    SaveSettings(),
+    ToolTip("Saving gesture settings...", , , 2),
+    Sleep(200),
+    ToolTip()
+)
