@@ -10,6 +10,7 @@ Description
 === Holding Middle BUTTON GESTURES ===
 
 ON DESKTOP (drag middle button):
+
 → Right: Next virtual desktop (Win+Ctrl+Right)
 
 ← Left: Previous virtual desktop (Win+Ctrl+Left)
