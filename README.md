@@ -1,20 +1,21 @@
 # Trackpoint-windows-gestures
 
-Short description
-short code uses to add trackpad window gestures to trackpoint
-
-
-README
-Using AutoHotKey just he AHK script i use to add gestures in as i couldnt find any solution elsewhere.
+Short code used to add trackpad window gestures to trackpoint
+Using AutoHotKey just the AHK script i use to add gestures in as i couldnt find any solution elsewhere.
 
 Not planning to do anything with this as it works well for me.
 
+
+Description
 === Holding Middle BUTTON GESTURES ===
 
 ON DESKTOP (drag middle button):
 → Right: Next virtual desktop (Win+Ctrl+Right)
+
 ← Left: Previous virtual desktop (Win+Ctrl+Left)
+
 ↑ Up: Task View (Win+Tab)
+
 ↓ Down: Show Desktop (Win+D)
 
 IN APPLICATIONS (drag middle button):
